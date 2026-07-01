@@ -427,3 +427,12 @@ FodyWeavers.xsd
 *.msix
 *.msm
 *.msp
+
+# azd
+.azure/
+
+# Local env
+.env
+
+# .NET build output
+[Bb]in/

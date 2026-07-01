@@ -1,0 +1,89 @@
+# Local + cloud test calls for the App Service connector-callback endpoint.
+#
+# The endpoint is  POST /api/onNewEmail  and it deserializes the body into the SDK's
+# Office365OnNewEmailTriggerPayload — wire shape:
+#     { "body": { "value": [ <GraphClientReceiveMessage>, ... ] } }
+# (same shape the Functions [ConnectorTrigger] binding receives.)
+#
+# LOCAL (recommended for iterating on the pipeline):
+#   1. az login                       (so DefaultAzureCredential can call the connections)
+#   2. Populate .env from .env.sample  (connection runtime URLs + Teams IDs), or use
+#      user-secrets / appsettings.Development.json.
+#   3. dotnet run --project ./src      (listens on http://localhost:5280)
+#   4. Send the requests below. There is NO Easy Auth locally, so no token is needed.
+#
+# CLOUD (https://<app>.azurewebsites.net):
+#   Easy Auth guards every route. A raw POST with no token returns 401 — that is the
+#   whole point of this sample. Only the Connector Namespace trigger (which attaches an
+#   Entra token minted from the trigger UAMI) can call it. So the cloud "test" is to send
+#   a real email to the connected mailbox, not to curl this endpoint. The unauthenticated
+#   401 check below documents the security boundary.
+
+@localUrl = http://localhost:5280
+@appUrl = {{$dotenv APP_URL}}
+
+### Liveness probe (local)
+GET {{localUrl}}/healthz
+
+### LOCAL — important email (allowlisted sender + urgent subject). Expect Teams card + flag.
+POST {{localUrl}}/api/onNewEmail
+Content-Type: application/json
+
+{
+  "body": {
+    "value": [
+      {
+        "id": "AAMkADlmOTA3NWNm",
+        "receivedDateTime": "2026-03-25T10:30:00+00:00",
+        "hasAttachments": false,
+        "subject": "Urgent: action needed on connector demo",
+        "bodyPreview": "Please review the connector demo before the summit session.",
+        "importance": "high",
+        "isRead": false,
+        "isHtml": true,
+        "body": "<html><body>Please review the connector demo before the summit. This is critical.</body></html>",
+        "from": "important.sender@contoso.com",
+        "toRecipients": "you@contoso.com"
+      }
+    ]
+  }
+}
+
+### LOCAL — non-important email (normal newsletter). Expect: skipped, no Teams card.
+POST {{localUrl}}/api/onNewEmail
+Content-Type: application/json
+
+{
+  "body": {
+    "value": [
+      {
+        "id": "AAMkADlmOTA3NWNn",
+        "receivedDateTime": "2026-03-25T11:00:00+00:00",
+        "hasAttachments": false,
+        "subject": "Weekly newsletter",
+        "bodyPreview": "Here are this week's top stories.",
+        "importance": "normal",
+        "isRead": false,
+        "isHtml": true,
+        "body": "<html><body>Here are this week's top stories.</body></html>",
+        "from": "newsletter@contoso.com",
+        "toRecipients": "you@contoso.com"
+      }
+    ]
+  }
+}
+
+### LOCAL — empty batch. Expect: 200, "nothing to process" log.
+POST {{localUrl}}/api/onNewEmail
+Content-Type: application/json
+
+{ "body": { "value": [] } }
+
+### CLOUD — security boundary check. Expect: 401 Unauthorized (Easy Auth, no token).
+GET {{appUrl}}/api/onNewEmail
+
+### CLOUD — POST with no token. Expect: 401 Unauthorized (proves the endpoint is not open).
+POST {{appUrl}}/api/onNewEmail
+Content-Type: application/json
+
+{ "body": { "value": [] } }
