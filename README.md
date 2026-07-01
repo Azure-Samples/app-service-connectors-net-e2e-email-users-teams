@@ -15,17 +15,6 @@ The only thing that changed is the **host**: instead of an Azure Functions app w
 `[ConnectorTrigger]` binding, the connector callback lands on an ordinary ASP.NET Core
 `POST /api/onNewEmail` endpoint running on App Service.
 
-> ### ✅ Validated end-to-end on App Service
-> This was deployed to a real subscription and proven live. A test email sent to the
-> monitored Inbox caused the Connector Namespace trigger to POST its
-> `ManagedServiceIdentity` token to the App Service endpoint; **App Service Easy Auth
-> admitted the token (200, not 401)**, the pipeline classified the mail as important,
-> enriched the sender via Office 365 Users, and — within ~40 seconds of arrival — posted a
-> Teams triage card (labeled *“via App Service”*, showing the sender's title/department/
-> manager and classification reasons) and set the Outlook follow-up flag on the source
-> email. **Conclusion: managed connectors work on a plain App Service Web App via the
-> generic HTTP-endpoint callback.**
-
 ## Why this works (the thing being validated)
 
 A Connector Namespace **trigger config** delivers events by POSTing to any
