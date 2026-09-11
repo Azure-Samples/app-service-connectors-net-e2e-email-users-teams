@@ -1,168 +1,195 @@
-# Managed Connectors on Azure App Service — M365 Email Triage
+# Managed Connectors on Azure App Service - M365 Email Triage
 
-This sample **validates that Azure Managed Connectors (Connector Namespace) work on a
-plain Azure App Service Web App**, not just on Azure Functions.
+This sample demonstrates the **Azure Managed Connectors public-preview capability to
+use Azure App Service as a trigger destination**. App Service is the host for the
+callback; this sample does not introduce or depend on a separate App Service preview.
 
-It is a port of the Azure Functions end-to-end sample
-[`functions-connectors-net-e2e-email-users-teams`](https://github.com/Azure-Samples/functions-connectors-net-e2e-email-users-teams).
-The business scenario is identical:
+It ports the Azure Functions end-to-end sample
+[`functions-connectors-net-e2e-email-users-teams`](https://github.com/Azure-Samples/functions-connectors-net-e2e-email-users-teams)
+to an ordinary ASP.NET Core web app:
 
-> When a new email arrives in a monitored Office 365 mailbox → classify its importance →
-> for important mail, enrich the sender via **Office 365 Users**, post a triage card to
-> **Microsoft Teams**, and set an Outlook **follow-up flag** on the source message.
+> When a new email arrives in a monitored Office 365 mailbox, classify its importance.
+> For important mail, enrich the sender through Office 365 Users, post a triage card to
+> Microsoft Teams, and set an Outlook follow-up flag on the source message.
 
-The only thing that changed is the **host**: instead of an Azure Functions app with a
-`[ConnectorTrigger]` binding, the connector callback lands on an ordinary ASP.NET Core
-`POST /api/onNewEmail` endpoint running on App Service.
+The complete flow has been validated with the first-class App Service destination:
+Easy Auth accepted the managed-identity callback, the app posted the Teams card, and
+the source Outlook message was flagged.
 
-## Why this works (the thing being validated)
+## What the App Service destination provides
 
-A Connector Namespace **trigger config** delivers events by POSTing to any
-`notificationDetails.callbackUrl`. It can attach a real **Entra ID bearer token** to that
-POST via `authentication.type = "ManagedServiceIdentity"` (minted from a user-assigned
-managed identity attached to the namespace). **This is compute-agnostic — it does not
-require the Functions runtime or a Functions system key.**
+When creating a trigger in the
+[Managed Connectors portal](https://connectors.azure.com), select **App Service** as
+the destination instead of entering a generic callback URL.
 
-On the receiving side, this sample secures the endpoint with **App Service built-in
-authentication (Easy Auth / `authsettingsV2`)**, which validates that token at the
-platform edge — signature, issuer, audience, and that the caller's object id equals the
-trigger UAMI's principal id (`defaultAuthorizationPolicy.allowedPrincipals.identities`).
-Easy Auth is a **shared App Service platform feature**, available on Web Apps and Function
-Apps alike, so it works here on a plain Web App.
+![App Service in the destination list](docs/images/app-service-destination.png)
 
-The **outbound** connector clients (`Office365Client`, `TeamsClient`,
-`Office365UsersClient`) and the trigger payload type (`Office365OnNewEmailTriggerPayload`)
-come from `Azure.Connectors.Sdk`. They only need a connection runtime URL + a
-`TokenCredential` (the web app's managed identity), so they are already fully portable —
-they move to App Service with **zero code changes**.
+The wizard:
+
+- Lets you select an existing App Service app.
+- Defaults the callback to `POST https://<app>.azurewebsites.net/api/webhook`. You can
+  edit the route after creating the trigger.
+- Uses the Connector Namespace user-assigned managed identity to request an Entra ID
+  token for the audience you provide.
+- Records App Service destination metadata on the trigger for display and lifecycle
+  management.
+
+The wizard does **not** configure authentication on the receiving app. This sample's
+Bicep configures App Service built-in authentication (Easy Auth) to validate the
+connector token before the request reaches ASP.NET Core.
+
+## Architecture
 
 ```mermaid
 flowchart LR
-    A[New email in<br/>Office 365 mailbox] --> B[Connector Namespace<br/>trigger config]
-    B -- "POST /api/onNewEmail<br/>Authorization: Bearer (trigger UAMI token)" --> C{App Service<br/>Easy Auth}
-    C -- "401 if no/invalid token<br/>403 if wrong oid" --> X[Rejected]
-    C -- "valid trigger-UAMI token" --> D[ASP.NET Core endpoint<br/>EmailTriageProcessor]
-    D --> E[ImportanceClassifier]
-    D -- "GetEmails / Flag" --> F[Office 365 connection]
-    D -- "UserProfile / Manager" --> G[Office 365 Users connection]
-    D -- "PostMessageToConversation" --> H[Teams connection]
+    A[New Outlook email] --> B[Managed Connectors<br/>trigger]
+    B -- "POST /api/webhook<br/>managed-identity token" --> C{App Service<br/>Easy Auth}
+    C -- "invalid token" --> X[401 / 403]
+    C -- "valid connector identity" --> D[ASP.NET Core<br/>EmailTriageProcessor]
+    D -- "GetEmails / Flag" --> E[Office 365 connector]
+    D -- "User profile / Manager" --> F[Office 365 Users connector]
+    D -- "Post Teams card" --> G[Teams connector]
 ```
 
-## What is Functions-specific and how it was replaced
+The inbound trigger and outbound actions are separate:
 
-| Azure Functions sample | App Service replacement (this sample) |
+- **Inbound:** Managed Connectors delivers the event to the App Service destination.
+  Easy Auth validates the managed-identity token's signature, issuer, audience, and
+  caller object ID.
+- **Outbound:** `Office365Client`, `Office365UsersClient`, and `TeamsClient` from
+  `Azure.Connectors.Sdk` use the web app's managed identity and the connection runtime
+  URLs provisioned by Bicep.
+
+## What changed from the Functions sample
+
+| Azure Functions sample | App Service sample |
 | --- | --- |
-| `[ConnectorTrigger] Office365OnNewEmailTriggerPayload` binding | ASP.NET Core `POST /api/onNewEmail` that `ReadFromJsonAsync<Office365OnNewEmailTriggerPayload>()` |
-| `/runtime/webhooks/connector?functionName=…&code=<system key>` | Plain route `https://<app>.azurewebsites.net/api/onNewEmail`, **no system key** |
-| `connector_extension` system key as the auth boundary | **Easy Auth** (`authsettingsV2`) validating the trigger UAMI's Entra token |
-| `ConfigureFunctionsWebApplication()` isolated host | `WebApplication.CreateBuilder(...)` (`Microsoft.NET.Sdk.Web`) |
-| Flex Consumption function app (`kind: functionapp,linux`, `FC1`) | App Service plan (Linux, `B1`, `alwaysOn`) + Web App (`kind: app,linux`, `DOTNETCORE\|10.0`) |
-| `AzureWebJobsStorage` + deployment storage container | Not needed (azd zip/oryx deploy) |
+| `[ConnectorTrigger]` binding | ASP.NET Core `POST /api/webhook` endpoint |
+| Azure Functions destination | Managed Connectors **App Service** destination |
+| Functions isolated worker | `WebApplication.CreateBuilder(...)` |
+| Function app | Linux App Service web app |
+| Functions webhook key | Easy Auth validating a managed-identity token |
 
-The connector **trigger config** is also created differently. Instead of pointing at the
-Functions webhook path with a `code=` system key, `infra/scripts/postdeploy.sh` PUTs a
-trigger config whose `callbackUrl` is the plain App Service route and whose
-`notificationDetails.authentication` is `ManagedServiceIdentity` (see below).
+`POST /api/onNewEmail` remains as a compatibility alias for trigger configurations
+created with the earlier generic HTTP endpoint flow.
 
-## Layout
+## Repository layout
 
-```
-email-triage-appservice/
-├─ azure.yaml                     # azd: host: appservice, language: dotnet, service "web"
-├─ src/
-│  ├─ EmailTriage.AppService.csproj  # Microsoft.NET.Sdk.Web, net10.0, Azure.Connectors.Sdk
-│  ├─ Program.cs                  # WebApplication host; maps POST /api/onNewEmail + /healthz
-│  ├─ EmailTriageProcessor.cs     # ported ProcessEmail pipeline (classify→enrich→Teams→flag)
-│  └─ ImportanceClassifier.cs     # copied verbatim from the Functions sample
-├─ infra/
-│  ├─ main.bicep                  # RG, plan, Web App, Easy Auth, App Insights, identities
-│  ├─ connectorNamespace.bicep    # Connector Namespace + 3 connections + access policies
-│  ├─ app/entra.bicep             # Entra app reg + SP + FIC to the web app MI
-│  ├─ main.parameters.json
-│  └─ scripts/postdeploy.{sh,ps1} # create MSI-auth trigger config + OAuth-consent connections
-├─ test.http                      # local + cloud callback test requests
-└─ .env.sample
+```text
+.
+|-- azure.yaml
+|-- docs/images/
+|-- infra/
+|   |-- app/entra.bicep
+|   |-- connectorNamespace.bicep
+|   |-- main.bicep
+|   `-- scripts/postdeploy.sh
+|-- src/
+|   |-- Program.cs
+|   |-- EmailTriageProcessor.cs
+|   `-- ImportanceClassifier.cs
+`-- test.http
 ```
 
 ## Prerequisites
 
-- An Azure subscription (Owner/Contributor on the target scope).
-- [Azure Developer CLI (`azd`)](https://aka.ms/azd), [Azure CLI (`az`)](https://aka.ms/azcli),
-  `jq`, and the .NET 10 SDK.
-- A Microsoft 365 mailbox you can consent with (the Inbox to monitor), and a **Teams team
-  + channel** to post triage cards to. You need the Team's `groupId` and the `channelId`.
-- Connector Namespace is in preview and is pinned to **`westcentralus`** by `main.bicep`.
-  Deploy the rest anywhere; the namespace module overrides its own location.
+- An Azure subscription with permission to deploy the resources in this sample.
+- [Azure Developer CLI (`azd`)](https://aka.ms/azd),
+  [Azure CLI (`az`)](https://aka.ms/azcli), `jq`, and the .NET 10 SDK.
+- A Microsoft 365 mailbox for the Outlook connection.
+- A Microsoft Teams team and channel where the sample can post triage cards.
+
+Connector Namespace is currently available in `westcentralus`; the rest of the
+deployment can use another Azure region.
 
 ## Deploy
 
 ```bash
-cd email-triage-appservice
-
-# 1. Sign in
 azd auth login
 az login
 
-# 2. Set the Teams target (required) and optional classifier tuning
-azd env new                      # or: azd env select <name>
-azd env set TEAMS_TEAM_ID    "<team-groupId>"
-azd env set TEAMS_CHANNEL_ID "<channelId>"
-# optional:
-# azd env set IMPORTANT_SENDERS "boss@contoso.com,ceo@contoso.com"
-# azd env set INTERNAL_DOMAINS  "contoso.com"
-# azd env set SERVICE_MANAGEMENT_REFERENCE "<service-tree-guid>"   # if your tenant requires it
+azd env new
+azd env set TEAMS_TEAM_ID "<team-group-id>"
+azd env set TEAMS_CHANNEL_ID "<channel-id>"
 
-# 3. Provision + deploy + run postdeploy (creates the trigger config, walks OAuth consent)
+# Optional classifier settings
+# azd env set IMPORTANT_SENDERS "boss@contoso.com,ceo@contoso.com"
+# azd env set INTERNAL_DOMAINS "contoso.com"
+
+# Set this only when required by your tenant.
+# azd env set SERVICE_MANAGEMENT_REFERENCE "<service-tree-guid>"
+
 azd up
 ```
 
-During `postdeploy` a browser tab opens **three times** — sign in / consent for the
-Office 365 Outlook, Teams, and Office 365 Users connections. Sign in to the Office 365
-connection with the mailbox whose Inbox you want to monitor.
+The post-deployment script opens the OAuth consent flow for the Office 365 Outlook,
+Teams, and Office 365 Users connections. Sign in to the Office 365 connection with the
+mailbox whose Inbox you want to monitor.
 
-> **Re-deploying?** The Connector Namespace RP rejects `identity` on update PUTs, so after
-> the first successful provision run `azd env set CREATE_CONNECTOR_NAMESPACE false` before
-> the next `azd up` (references the namespace as `existing`).
+> **Re-deploying?** The Connector Namespace resource provider currently rejects identity
+> updates. After the first successful provision, run
+> `azd env set CREATE_CONNECTOR_NAMESPACE false` before the next `azd up`.
+
+## Create the App Service trigger
+
+After deployment, the post-deployment script prints the Managed Connectors portal URL,
+the App Service name, and the audience value.
+
+1. Open the printed portal URL and select **Create trigger**.
+2. Choose **Office 365 Outlook** > **When a new email arrives (V3)** and select the
+   deployed Office 365 connection.
+3. For **Destination type**, choose **App Service** and select the deployed web app.
+4. Enter the printed `entraAppIdentifierUri` value in **Audience**.
+5. Create the trigger. The wizard defaults the callback to `POST /api/webhook`; edit the
+   trigger afterward if your application uses a different route.
 
 ## Validate end to end
 
-1. **Security boundary** — confirm the endpoint is not open:
-   ```bash
-   curl -i https://<app>.azurewebsites.net/api/onNewEmail        # expect: 401 (Easy Auth)
-   ```
-   A 401 here is the proof that only the trigger's MI-authenticated callback gets through.
-2. **Trigger it** — send an email to the monitored mailbox. Make it look important (e.g.
-   from a sender in `IMPORTANT_SENDERS`, subject like `Urgent: …`, a deadline/ask in the
-   body).
-3. **Observe the results**:
-   - A **triage card** appears in the configured Teams channel (labeled “via App Service”).
-   - The **source email is flagged** for follow-up in Outlook.
-   - Logs show the classification + calls:
-     ```bash
-     az webapp log tail -g <rg> -n <app>
-     ```
-     and traces land in Application Insights.
+First confirm that the callback is not publicly callable:
+
+```bash
+curl -i https://<app>.azurewebsites.net/api/webhook
+```
+
+Expect `401 Unauthorized` from Easy Auth.
+
+Then send an important-looking email to the connected mailbox. The expected result is:
+
+1. The trigger run reports a successful callback.
+2. A triage card appears in the configured Teams channel.
+3. The source email is flagged for follow-up in Outlook.
+4. Processing traces appear in Application Insights.
+
+Stream application logs with:
+
+```bash
+az webapp log tail --resource-group <resource-group> --name <app>
+```
 
 ## Run locally
 
-Easy Auth only exists in Azure, so locally the endpoint is open and you POST the sample
-payloads directly:
+Easy Auth runs only in Azure. For local development, authenticate with Azure CLI,
+provide the connection runtime URLs and Teams IDs, and send the requests in
+`test.http`.
 
 ```bash
-az login                                  # DefaultAzureCredential uses this for connector calls
-cp .env.sample .env                       # fill in the 3 RUNTIME_URLs + Teams IDs (from azd env get-values)
-dotnet run --project ./src                # http://localhost:5280
-# then send the LOCAL requests in test.http
+az login
+cp .env.sample .env
+dotnet run --project ./src
 ```
 
-## Notes / caveats
+## Current limitations
 
-- **Callback timeout:** the connector runtime expects a timely `2xx`. Like the Functions
-  original, this sample processes inline and returns `200`. If the connector enforces a
-  short timeout under load, switch the endpoint to return `202` and process in the
-  background.
-- **`entra.bicep`** keeps its `functionAppHostname` parameter name from the source sample;
-  the value passed in is the App Service hostname (the `/.auth/login/aad/callback`
-  redirect URI is identical for Web Apps and Function Apps).
-- This is a **validation sample**, not production-hardened. It uses `B1` and in-memory
-  caches; scale/secure appropriately for real workloads.
+- Managed Connectors, including the App Service trigger destination, is in public
+  preview.
+- Trigger creation and connection management happen in the Managed Connectors portal,
+  not the App Service portal.
+- The App Service destination defaults to `/api/webhook`. Changing the route requires
+  editing the trigger after creation.
+- The receiving app's Easy Auth trust is not configured by the trigger wizard. This
+  sample provisions the required app registration, federated credential, audience,
+  and allowed connector identity.
+- Easy Auth's `requireAuthentication` setting protects the whole app, not only the
+  connector callback route.
+- This sample validates a push trigger. It does not validate every connector or trigger
+  type.

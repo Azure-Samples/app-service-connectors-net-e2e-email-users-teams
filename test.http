@@ -1,6 +1,6 @@
 # Local + cloud test calls for the App Service connector-callback endpoint.
 #
-# The endpoint is  POST /api/onNewEmail  and it deserializes the body into the SDK's
+# The endpoint is POST /api/webhook and it deserializes the body into the SDK's
 # Office365OnNewEmailTriggerPayload — wire shape:
 #     { "body": { "value": [ <GraphClientReceiveMessage>, ... ] } }
 # (same shape the Functions [ConnectorTrigger] binding receives.)
@@ -26,7 +26,7 @@
 GET {{localUrl}}/healthz
 
 ### LOCAL — important email (allowlisted sender + urgent subject). Expect Teams card + flag.
-POST {{localUrl}}/api/onNewEmail
+POST {{localUrl}}/api/webhook
 Content-Type: application/json
 
 {
@@ -50,7 +50,7 @@ Content-Type: application/json
 }
 
 ### LOCAL — non-important email (normal newsletter). Expect: skipped, no Teams card.
-POST {{localUrl}}/api/onNewEmail
+POST {{localUrl}}/api/webhook
 Content-Type: application/json
 
 {
@@ -74,16 +74,16 @@ Content-Type: application/json
 }
 
 ### LOCAL — empty batch. Expect: 200, "nothing to process" log.
-POST {{localUrl}}/api/onNewEmail
+POST {{localUrl}}/api/webhook
 Content-Type: application/json
 
 { "body": { "value": [] } }
 
 ### CLOUD — security boundary check. Expect: 401 Unauthorized (Easy Auth, no token).
-GET {{appUrl}}/api/onNewEmail
+GET {{appUrl}}/api/webhook
 
 ### CLOUD — POST with no token. Expect: 401 Unauthorized (proves the endpoint is not open).
-POST {{appUrl}}/api/onNewEmail
+POST {{appUrl}}/api/webhook
 Content-Type: application/json
 
 { "body": { "value": [] } }
