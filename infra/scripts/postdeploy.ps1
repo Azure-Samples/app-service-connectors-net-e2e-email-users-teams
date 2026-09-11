@@ -1,9 +1,7 @@
 # Post-deployment configuration for the App Service + Connector Namespace sample.
-# See postdeploy.sh for the full explanation. In short:
-#   1. Create the Office 365 trigger config whose callbackUrl is a plain App
-#      Service route secured by ManagedServiceIdentity auth (Easy Auth validates
-#      the attached Entra token).
-#   2. Drive OAuth consent for the three connector connections.
+# See postdeploy.sh for the full explanation. This script authorizes the three
+# connector connections. The first-class App Service trigger is then created in
+# the Connector Namespace portal, which binds it to the web app and route.
 
 $ErrorActionPreference = "Stop"
 
@@ -18,70 +16,20 @@ $connectorNamespaceConnectionName = $outputs.connectorNamespaceConnectionName
 $connectorNamespaceTeamsConnectionName = $outputs.connectorNamespaceTeamsConnectionName
 $connectorNamespaceOffice365usersConnectionName = $outputs.connectorNamespaceOffice365usersConnectionName
 $appServiceName = $outputs.appServiceName
-$appServiceDefaultHostname = $outputs.appServiceDefaultHostname
-$office365EndpointName = $outputs.office365EndpointName
-$entraAppClientId = $outputs.entraAppClientId
-$triggerIdentityResourceId = $outputs.triggerIdentityResourceId
-
-# --- Create Connector Namespace trigger config ---
-Write-Host "Creating Connector Namespace trigger config..." -ForegroundColor Yellow
-
-$triggerName = "$connectorNamespaceConnectionName-trigger"
-
-# Plain App Service route. No /runtime/webhooks/connector, no code= system key.
-$callbackUrl = "https://$appServiceDefaultHostname/api/$office365EndpointName"
-
-$apiUrl = "https://management.azure.com/subscriptions/$subscriptionId/resourceGroups/$resourceGroupName/providers/Microsoft.Web/connectorGateways/$connectorNamespaceName/triggerconfigs/${triggerName}?api-version=2026-05-01-preview"
-
-$body = @{
-  properties = @{
-    description = "Office 365 Outlook trigger config (secured with MI + App Service built-in authentication)"
-    connectionDetails = @{
-      connectorName = "office365"
-      connectionName = $connectorNamespaceConnectionName
-    }
-    operationName = "OnNewEmailV3"
-    parameters = @(
-      @{ name = "folderPath"; value = "Inbox" }
-    )
-    notificationDetails = @{
-      callbackUrl = $callbackUrl
-      httpMethod = "Post"
-      authentication = @{
-        type = "ManagedServiceIdentity"
-        audience = $entraAppClientId
-        identity = $triggerIdentityResourceId
-      }
-    }
-  }
-} | ConvertTo-Json -Depth 10 -Compress
-
-Write-Host "  API URL: $apiUrl" -ForegroundColor Cyan
-Write-Host "  Callback URL: $callbackUrl" -ForegroundColor Cyan
-Write-Host "  Token audience: $entraAppClientId" -ForegroundColor Cyan
-
-$tmpFile = [System.IO.Path]::GetTempFileName()
-$body | Out-File -FilePath $tmpFile -Encoding utf8
-az rest --method PUT --url $apiUrl --body "@$tmpFile" --headers "Content-Type=application/json" | Out-Null
-Remove-Item $tmpFile
-
-Write-Host "Connector Namespace trigger config created." -ForegroundColor Green
+$entraAppIdentifierUri = $outputs.entraAppIdentifierUri
 
 # --- Install the official connector-namespace az CLI extension ---
 if (-not $env:CONNECTOR_NAMESPACE_EXT_URL) {
-  $rel = Invoke-RestMethod -Uri "https://api.github.com/repos/Azure/Connectors/releases?per_page=1"
-  $asset = $rel.assets | Where-Object { $_.browser_download_url -match "connector_namespace.*\.whl" } | Select-Object -First 1
+  $rel = Invoke-RestMethod -Uri "https://api.github.com/repos/Azure/Connectors/releases?per_page=20"
+  $asset = $rel | ForEach-Object { $_.assets } | Where-Object { $_.browser_download_url -match "connector_namespace.*\.whl" } | Select-Object -First 1
   if ($asset) { $env:CONNECTOR_NAMESPACE_EXT_URL = $asset.browser_download_url }
 }
 if (-not $env:CONNECTOR_NAMESPACE_EXT_URL) {
   Write-Error "Could not resolve connector-namespace extension URL from Azure/Connectors releases"
   exit 2
 }
-$ext = az extension show --name connector-namespace 2>$null
-if (-not $ext) {
-  Write-Host "Installing 'connector-namespace' Azure CLI extension from $($env:CONNECTOR_NAMESPACE_EXT_URL)" -ForegroundColor Cyan
-  az extension add --upgrade --yes --source $env:CONNECTOR_NAMESPACE_EXT_URL
-}
+Write-Host "Installing/updating 'connector-namespace' Azure CLI extension from $($env:CONNECTOR_NAMESPACE_EXT_URL)" -ForegroundColor Cyan
+az extension add --upgrade --yes --source $env:CONNECTOR_NAMESPACE_EXT_URL
 
 # --- Authorize the connector connections (OAuth consent) ---
 Write-Host ""
@@ -94,7 +42,10 @@ function Authorize-Connection {
 
   $currentStatus = az connector-namespace connection show `
     -g $resourceGroupName --namespace $connectorNamespaceName `
-    -n $ConnectionName --query "properties.overallStatus" -o tsv 2>$null
+    -n $ConnectionName --query "properties.overallStatus" -o tsv
+  if ($LASTEXITCODE -ne 0) {
+    throw "Failed to read connection status for $ConnectionName"
+  }
   if ($currentStatus -and $currentStatus.ToLower() -eq "connected") {
     Write-Host "   already Connected; skipping consent flow" -ForegroundColor Green
     return
@@ -104,12 +55,15 @@ function Authorize-Connection {
   '[{"parameterName":"token","redirectUrl":"https://portal.azure.com"}]' | Out-File -FilePath $paramsFile -Encoding utf8
   $consentJson = az connector-namespace connection list-consent-links `
     -g $resourceGroupName --namespace $connectorNamespaceName `
-    --connection-name $ConnectionName --parameters "@$paramsFile" -o json 2>$null
+    --connection-name $ConnectionName --parameters "@$paramsFile" -o json
+  $consentExitCode = $LASTEXITCODE
   Remove-Item $paramsFile
+  if ($consentExitCode -ne 0) {
+    throw "Failed to create an OAuth consent link for $ConnectionName"
+  }
   $link = ($consentJson | ConvertFrom-Json).value[0].link
   if (-not $link) {
-    Write-Host "   list-consent-links returned no link; skipping" -ForegroundColor Red
-    return
+    throw "list-consent-links returned no link for $ConnectionName"
   }
 
   Write-Host "   opening browser for OAuth consent..." -ForegroundColor Cyan
@@ -133,7 +87,7 @@ function Authorize-Connection {
     }
     Start-Sleep -Seconds 3
   }
-  Write-Host "   timed out waiting for consent (5 min). Re-run this script when ready." -ForegroundColor Yellow
+  throw "Timed out waiting for $ConnectionName consent after 5 minutes"
 }
 
 Authorize-Connection $connectorNamespaceConnectionName               "Office 365 Outlook (trigger + sender history + flag)"
@@ -142,5 +96,12 @@ Authorize-Connection $connectorNamespaceOffice365usersConnectionName "Office 365
 
 Write-Host ""
 Write-Host "All connector connections authorized." -ForegroundColor Green
+Write-Host "Create the App Service trigger in the Connector Namespace portal:" -ForegroundColor Yellow
+Write-Host "  https://connectors.azure.com/$subscriptionId/$resourceGroupName/$connectorNamespaceName/triggers" -ForegroundColor Cyan
+Write-Host "  Source: Office 365 Outlook / When a new email arrives (V3)" -ForegroundColor Cyan
+Write-Host "  Connection: $connectorNamespaceConnectionName" -ForegroundColor Cyan
+Write-Host "  Destination: App Service / $appServiceName" -ForegroundColor Cyan
+Write-Host "  Audience: $entraAppIdentifierUri" -ForegroundColor Cyan
+Write-Host "  The App Service destination defaults to POST /api/webhook." -ForegroundColor Cyan
 Write-Host "Tail logs: az webapp log tail -g $resourceGroupName -n $appServiceName" -ForegroundColor Green
 Write-Host ""

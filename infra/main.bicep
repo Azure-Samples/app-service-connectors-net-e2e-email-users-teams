@@ -14,7 +14,7 @@ param environmentName string
 param location string
 
 metadata name = 'Managed Connectors on App Service — M365 Email Triage'
-metadata description = 'Ports the Azure Functions connectors e2e sample (email -> Office 365 Users -> Teams -> flag) to an App Service Web App. The Connector Namespace trigger calls a plain HTTP endpoint secured by App Service built-in authentication (Easy Auth) validating the trigger UAMI token — no Functions runtime, no system keys.'
+metadata description = 'Ports the Azure Functions connectors e2e sample (email -> Office 365 Users -> Teams -> flag) to an App Service Web App. The Managed Connectors App Service destination calls /api/webhook, secured by App Service built-in authentication (Easy Auth) validating the trigger UAMI token.'
 
 @description('Id of the user identity used for local debugging. Granted access to the connections so the same code can be run locally with `az login`.')
 @metadata({

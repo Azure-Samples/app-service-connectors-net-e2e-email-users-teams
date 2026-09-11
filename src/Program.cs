@@ -63,22 +63,30 @@ var app = builder.Build();
 // by default Easy Auth guards everything, which is fine for a private triage app).
 app.MapGet("/healthz", () => Results.Ok(new { status = "healthy" }));
 
-// Connector trigger callback. This is the App Service replacement for the Functions
-// `[ConnectorTrigger]` binding + `/runtime/webhooks/connector` endpoint.
+// Connector trigger callback. The Managed Connectors portal's App Service destination
+// sends trigger events to POST /api/webhook.
 //
 // AUTH: there is intentionally no key/secret check here. App Service **Easy Auth**
 // (authsettingsV2) validates the Entra bearer token the Connector Namespace attaches
 // (authentication.type = ManagedServiceIdentity) at the edge — signature, issuer,
 // audience, and that the caller's oid is the trigger UAMI's principalId. Any request
 // that reaches this handler has already passed that gate, so the code just does the work.
-app.MapPost("/api/onNewEmail", async (
+app.MapPost("/api/webhook", HandleConnectorCallback);
+
+// Preserve the route used by earlier versions of this sample and by generic HTTP
+// destination configurations.
+app.MapPost("/api/onNewEmail", HandleConnectorCallback);
+
+app.Run();
+
+async Task<IResult> HandleConnectorCallback(
     HttpRequest request,
     EmailTriageProcessor processor,
     ILoggerFactory loggerFactory,
-    CancellationToken cancellationToken) =>
+    CancellationToken cancellationToken)
 {
-    var logger = loggerFactory.CreateLogger("OnNewEmailEndpoint");
-    logger.LogInformation("OnNewEmail callback received (caller pre-validated by App Service built-in authentication).");
+    var logger = loggerFactory.CreateLogger("ConnectorWebhookEndpoint");
+    logger.LogInformation("Connector callback received (caller pre-validated by App Service built-in authentication).");
 
     Office365OnNewEmailTriggerPayload? payload;
     try
@@ -96,9 +104,7 @@ app.MapPost("/api/onNewEmail", async (
 
     // The connector runtime expects a timely 2xx to consider the callback delivered.
     return Results.Ok();
-});
-
-app.Run();
+}
 
 // Fail loudly at boot if a required connection URL setting is missing — otherwise the
 // connector clients silently get an empty BaseAddress and every call throws deep in the

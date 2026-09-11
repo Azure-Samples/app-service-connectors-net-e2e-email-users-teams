@@ -87,7 +87,7 @@ public sealed class EmailTriageProcessor
     }
 
     /// <summary>
-    /// Entry point invoked by the HTTP endpoint once the connector callback body has been
+    /// Entry point invoked by the App Service webhook once the connector callback body has been
     /// deserialized. Iterates the batch, classifies each email, and for the important ones
     /// enriches + posts to Teams + flags the source message.
     /// </summary>
